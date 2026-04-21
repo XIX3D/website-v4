@@ -1,0 +1,3 @@
+[cc-dispatch] Mode: single | Task: Initialize the project according to spec.md and build the Next.js GSAP scroll-scrubbing foundation.
+[cc-dispatch] Task launched in local tmux session 'cc-cc-1776797008-3257297' — running independently.
+[cc-dispatch] You'll get a Telegram ping when done. No need to wait here.
