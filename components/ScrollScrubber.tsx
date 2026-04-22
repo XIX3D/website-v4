@@ -88,12 +88,14 @@ function buildFrameCache(total: number): FrameCache {
   return new Array(total).fill(null)
 }
 
+const CDN_BASE = "https://floeztbeqtdehjvurcwg.supabase.co/storage/v1/object/public/mclaren-frames"
+
 function framePath(index: number, isMobile: boolean): string {
   const padded = String(index).padStart(3, "0")
   if (isMobile) {
-    return `/media/png_mobile/Zeno Home Page Mobile SLOWED${padded}.png`
+    return `${CDN_BASE}/mobile/Zeno Home Page Mobile SLOWED${padded}.png`
   }
-  return `/media/png_horizontal/Zeno Home Page Desktop SLOWER${padded}.png`
+  return `${CDN_BASE}/horizontal/Zeno Home Page Desktop SLOWER${padded}.png`
 }
 
 function loadFrame(
