@@ -2,39 +2,37 @@
 
 import { useEffect, useRef } from "react"
 import { gsap } from "gsap"
-import type { Chapter } from "@/data/chapters"
+import type { PausePoint } from "@/data/pausePoints"
 
 interface Props {
-  chapter: Chapter | null
-  /** 0–1 within the current dwell zone (0 = entering, 1 = leaving) */
-  dwellProgress: number
+  pause: PausePoint | null
 }
 
-export default function ChapterOverlay({ chapter, dwellProgress }: Props) {
+export default function ChapterOverlay({ pause }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const prevChapterRef = useRef<Chapter | null>(null)
+  const prevRef = useRef<PausePoint | null>(null)
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
 
-    const entering = chapter !== null && prevChapterRef.current === null
-    const leaving = chapter === null && prevChapterRef.current !== null
+    const entering = pause !== null && prevRef.current === null
+    const leaving = pause === null && prevRef.current !== null
 
     if (entering) {
       gsap.fromTo(
         el,
-        { opacity: 0, y: 32 },
-        { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }
+        { opacity: 0, y: 40 },
+        { opacity: 1, y: 0, duration: 0.6, ease: "power2.out" }
       )
     } else if (leaving) {
-      gsap.to(el, { opacity: 0, y: -24, duration: 0.35, ease: "power2.in" })
+      gsap.to(el, { opacity: 0, y: -30, duration: 0.4, ease: "power2.in" })
     }
 
-    prevChapterRef.current = chapter
-  }, [chapter])
+    prevRef.current = pause
+  }, [pause])
 
-  if (!chapter) return null
+  if (!pause) return null
 
   return (
     <div
@@ -42,21 +40,33 @@ export default function ChapterOverlay({ chapter, dwellProgress }: Props) {
       className="absolute inset-0 flex items-end justify-start pointer-events-none"
       style={{ opacity: 0 }}
     >
-      <div className="mb-16 ml-12 md:ml-20 max-w-lg text-white">
-        <p className="text-xs uppercase tracking-[0.25em] text-white/60 mb-3 font-light">
-          {chapter.subtitle}
-        </p>
-        <h2 className="text-4xl md:text-6xl font-semibold tracking-tight leading-none mb-4">
-          {chapter.title}
+      <div className="mb-16 ml-10 md:ml-20 max-w-xl text-white">
+        {pause.eyebrow && (
+          <p className="text-sm md:text-base uppercase tracking-[0.3em] text-white/60 mb-2 font-medium">
+            {pause.eyebrow}
+          </p>
+        )}
+        <h2 className="text-4xl md:text-6xl font-semibold tracking-tight leading-none mb-3">
+          {pause.title}
         </h2>
-        <p className="text-base md:text-lg text-white/70 leading-relaxed font-light">
-          {chapter.body}
+        <p className="text-base md:text-lg text-white/65 leading-relaxed font-light max-w-sm">
+          {pause.body}
         </p>
-        <div className="mt-6 flex items-center gap-2">
-          <span className="block w-8 h-px bg-white/40" />
-          <span className="text-xs text-white/40 tabular-nums">
-            {String(chapter.id).padStart(2, "0")}
-          </span>
+        <div className="mt-5 flex items-center gap-3">
+          <button
+            className="
+              pointer-events-auto
+              border border-white/30 rounded-full
+              px-5 py-2.5 text-sm font-medium tracking-wider
+              hover:bg-white hover:text-black transition-colors duration-300
+              cursor-pointer
+            "
+            onClick={() => {
+              /* TODO: wire up Learn More links per pause */
+            }}
+          >
+            Learn More
+          </button>
         </div>
       </div>
     </div>

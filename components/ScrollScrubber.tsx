@@ -6,7 +6,13 @@ import { ScrollTrigger } from "gsap/ScrollTrigger"
 import { useGSAP } from "@gsap/react"
 import ChapterOverlay from "@/components/ChapterOverlay"
 import { useIsMobile } from "@/hooks/useIsMobile"
-import { CHAPTERS, SCROLL_MULTIPLIER, TOTAL_FRAMES, type Chapter } from "@/data/chapters"
+import {
+  PAUSE_POINTS,
+  TOTAL_FRAMES,
+  SCROLL_MULTIPLIER,
+  PAUSE_LOCK_MS,
+  type PausePoint,
+} from "@/data/pausePoints"
 
 gsap.registerPlugin(ScrollTrigger, useGSAP)
 
@@ -14,88 +20,45 @@ gsap.registerPlugin(ScrollTrigger, useGSAP)
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Map a scroll progress [0–1] to a normalized video/frame progress [0–1],
- * clamping at dwell zones so the animation pauses at keyframes.
- */
-function scrollToFrameProgress(scrollP: number): number {
-  let frameP = scrollP
-
-  for (const ch of CHAPTERS) {
-    if (scrollP >= ch.dwellStart && scrollP <= ch.dwellEnd) {
-      // Inside dwell — lock to chapter's keyframe
-      return ch.videoProgress
-    }
-    if (scrollP > ch.dwellEnd) {
-      // Past this dwell: we need to compress the remaining play zones.
-      // The dead scroll space of all preceding dwells shifts the mapping.
-    }
-  }
-
-  // Remap play zones: strip out dwell widths accumulated so far.
-  // Total dwell width = CHAPTERS.length * dwell_per_chapter
-  // We compute effective play progress by subtracting passed-dwell time.
-  let accumulatedDwell = 0
-  let prevChVideoP = 0
-  let prevChDwellEnd = 0
-
-  for (const ch of CHAPTERS) {
-    const dwellWidth = ch.dwellEnd - ch.dwellStart
-
-    if (scrollP < ch.dwellStart) {
-      // In a play zone leading to this chapter
-      const playStart = prevChDwellEnd
-      const playEnd = ch.dwellStart
-      const playWidth = playEnd - playStart
-      const videoPlayWidth = ch.videoProgress - prevChVideoP
-      const t = (scrollP - playStart) / playWidth
-      return prevChVideoP + t * videoPlayWidth
-    }
-
-    accumulatedDwell += dwellWidth
-    prevChVideoP = ch.videoProgress
-    prevChDwellEnd = ch.dwellEnd
-  }
-
-  // Final play zone (after last chapter's dwell to scroll end)
-  const lastCh = CHAPTERS[CHAPTERS.length - 1]
-  const playStart = lastCh.dwellEnd
-  const playWidth = 1 - playStart
-  const videoPlayWidth = 1 - lastCh.videoProgress
-  const t = Math.min((scrollP - playStart) / playWidth, 1)
-  return lastCh.videoProgress + t * videoPlayWidth
+/** Pad a frame index to 3 digits */
+function pad(index: number): string {
+  return String(index).padStart(3, "0")
 }
 
-/** Return the chapter whose dwell zone contains scrollP, or null */
-function getActiveChapter(scrollP: number): Chapter | null {
-  return CHAPTERS.find(
-    (ch) => scrollP >= ch.dwellStart && scrollP <= ch.dwellEnd
-  ) ?? null
+/** Map scroll progress [0–1] to frame index [0–TOTAL_FRAMES-1] */
+function scrollToFrameIndex(scrollP: number): number {
+  return Math.round(scrollP * (TOTAL_FRAMES - 1))
 }
 
-/** Clamp a number between lo and hi */
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v))
+/** Find which pause point (if any) a frame index falls into */
+function getActivePause(
+  frameIndex: number
+): PausePoint | null {
+  for (const pp of PAUSE_POINTS) {
+    if (frameIndex === pp.frame) return pp
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
-// PNG sequence loader
+// Frame cache + loader
 // ---------------------------------------------------------------------------
 
 type FrameCache = (HTMLImageElement | null)[]
 
-function buildFrameCache(total: number): FrameCache {
-  return new Array(total).fill(null)
+function buildFrameCache(): FrameCache {
+  return new Array(TOTAL_FRAMES).fill(null)
 }
 
-const CDN_BASE = "https://floeztbeqtdehjvurcwg.supabase.co/storage/v1/object/public/mclaren-frames"
+const CDN_BASE =
+  "https://floeztbeqtdehjvurcwg.supabase.co/storage/v1/object/public/mclaren-frames"
 
-function framePath(index: number, isMobile: boolean): string {
-  const padded = String(index).padStart(3, "0")
+function frameUrl(index: number, isMobile: boolean): string {
+  const p = pad(index)
   if (isMobile) {
-    return `${CDN_BASE}/mobile/Zeno Home Page Mobile SLOWED${padded}.webp`
+    return `${CDN_BASE}/mobile/Zeno Home Page Mobile SLOWED${p}.webp`
   }
-  return `${CDN_BASE}/horizontal/Zeno Home Page Desktop SLOWER${padded}.webp`
+  return `${CDN_BASE}/horizontal/Zeno Home Page Desktop SLOWER${p}.webp`
 }
 
 function loadFrame(
@@ -111,16 +74,15 @@ function loadFrame(
       resolve(img)
     }
     img.onerror = reject
-    img.src = framePath(index, isMobile)
+    img.src = frameUrl(index, isMobile)
   })
 }
 
-/** Eagerly pre-load a window of frames around the current index */
 function prefetchWindow(
   currentIndex: number,
   cache: FrameCache,
   isMobile: boolean,
-  radius = 20
+  radius = 30
 ) {
   const lo = Math.max(0, currentIndex - radius)
   const hi = Math.min(TOTAL_FRAMES - 1, currentIndex + radius)
@@ -132,23 +94,22 @@ function prefetchWindow(
 }
 
 // ---------------------------------------------------------------------------
-// Progress bar component
+// Progress dots
 // ---------------------------------------------------------------------------
 
-function ProgressDots({ scrollP }: { scrollP: number }) {
+function ProgressDots({ activeIndex }: { activeIndex: number }) {
   return (
     <div className="absolute right-8 top-1/2 -translate-y-1/2 flex flex-col gap-3 pointer-events-none">
-      {CHAPTERS.map((ch) => {
-        const active = scrollP >= ch.dwellStart && scrollP <= ch.dwellEnd
-        const passed = scrollP > ch.dwellEnd
+      {PAUSE_POINTS.map((pp, i) => {
+        const active = activeIndex === pp.frame
         return (
           <div
-            key={ch.id}
-            className="w-1.5 h-1.5 rounded-full transition-all duration-300"
+            key={i}
+            className="w-1.5 h-1.5 rounded-full transition-all duration-500"
             style={{
               background: active
                 ? "rgba(255,255,255,0.95)"
-                : passed
+                : activeIndex > pp.frame
                 ? "rgba(255,255,255,0.4)"
                 : "rgba(255,255,255,0.15)",
               transform: active ? "scale(1.8)" : "scale(1)",
@@ -167,25 +128,36 @@ function ProgressDots({ scrollP }: { scrollP: number }) {
 export default function ScrollScrubber() {
   const isMobile = useIsMobile()
   const sectionRef = useRef<HTMLDivElement>(null)
-  const stickyRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
-  const frameCacheRef = useRef<FrameCache>(buildFrameCache(TOTAL_FRAMES))
+  const frameCacheRef = useRef<FrameCache>(buildFrameCache())
   const currentFrameRef = useRef(0)
-  const scrollPRef = useRef(0)
-  const rafRef = useRef<number | null>(null)
-  const isScrollLockedRef = useRef(false)
-  const lockTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const [activeChapter, setActiveChapter] = useState<Chapter | null>(null)
+  // Pause lock state
+  const isLockedRef = useRef(false)
+  const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingScrollRef = useRef<number | null>(null)
+
+  const [activePause, setActivePause] = useState<PausePoint | null>(null)
   const [scrollP, setScrollP] = useState(0)
 
-  // Reset cache when orientation changes
+  // Hide body scrollbar for the page
   useEffect(() => {
-    frameCacheRef.current = buildFrameCache(TOTAL_FRAMES)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [])
+
+  // Reset cache on mobile/desktop switch
+  useEffect(() => {
+    frameCacheRef.current = buildFrameCache()
   }, [isMobile])
 
-  // Draw a frame to canvas
+  // ---------------------------------------------------------------------------
+  // Canvas draw
+  // ---------------------------------------------------------------------------
   const drawFrame = useCallback(
     (index: number) => {
       const canvas = canvasRef.current
@@ -197,17 +169,12 @@ export default function ScrollScrubber() {
         if (!ctx) return
         ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-        // Cover-fit: maintain aspect ratio, fill canvas
         const iw = img.naturalWidth
         const ih = img.naturalHeight
         const cw = canvas.width
         const ch = canvas.height
         const scale = Math.max(cw / iw, ch / ih)
-        const sw = iw * scale
-        const sh = ih * scale
-        const ox = (cw - sw) / 2
-        const oy = (ch - sh) / 2
-        ctx.drawImage(img, ox, oy, sw, sh)
+        ctx.drawImage(img, 0, 0, iw * scale, ih * scale)
       }
 
       if (cache[index]) {
@@ -219,7 +186,6 @@ export default function ScrollScrubber() {
     [isMobile]
   )
 
-  // Resize canvas to match window
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -234,74 +200,102 @@ export default function ScrollScrubber() {
     return () => window.removeEventListener("resize", resizeCanvas)
   }, [resizeCanvas])
 
-  // Preload first ~30 frames immediately
+  // Preload first frames
   useEffect(() => {
-    prefetchWindow(0, frameCacheRef.current, isMobile, 30)
+    prefetchWindow(0, frameCacheRef.current, isMobile, 40)
   }, [isMobile])
 
   // ---------------------------------------------------------------------------
-  // Scroll lock: freeze body scroll when entering a dwell zone
-  // Releases after the user scrolls again (via wheel/touch)
+  // Release lock after dwell timeout
   // ---------------------------------------------------------------------------
   const releaseLock = useCallback(() => {
-    isScrollLockedRef.current = false
-    if (lockTimeoutRef.current) clearTimeout(lockTimeoutRef.current)
+    isLockedRef.current = false
+    if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+    lockTimerRef.current = null
+    // Apply pending scroll if one accumulated
+    if (pendingScrollRef.current !== null && sectionRef.current) {
+      const targetY =
+        sectionRef.current.offsetTop +
+        pendingScrollRef.current * (sectionRef.current.offsetHeight - window.innerHeight)
+      window.scrollTo({ top: targetY })
+      pendingScrollRef.current = null
+    }
   }, [])
 
-  useEffect(() => {
-    // Wheel handler: allow scroll to break out of dwell lock
-    const onWheel = (e: WheelEvent) => {
-      if (isScrollLockedRef.current) {
-        // Absorb first wheel tick within dwell to "acknowledge" the pause
-        // then release so subsequent ticks scroll normally
-        releaseLock()
-      }
-    }
-    window.addEventListener("wheel", onWheel, { passive: true })
-    return () => window.removeEventListener("wheel", onWheel)
-  }, [releaseLock])
-
   // ---------------------------------------------------------------------------
-  // GSAP ScrollTrigger: drives progress
+  // GSAP ScrollTrigger — scrub drives frame index
   // ---------------------------------------------------------------------------
   useGSAP(
     () => {
       if (!sectionRef.current) return
 
-      const progressObj = { value: 0 }
+      let lastPauseFrame: number | null = null
 
       const st = ScrollTrigger.create({
         trigger: sectionRef.current,
         start: "top top",
         end: `+=${window.innerHeight * SCROLL_MULTIPLIER}`,
-        scrub: 1.5,
+        scrub: true, // native feel, smooth interpolation
         onUpdate: (self) => {
-          const sp = clamp(self.progress, 0, 1)
-          scrollPRef.current = sp
-          setScrollP(sp)
+          const sp = self.progress // 0–1
 
-          const fp = scrollToFrameProgress(sp)
-          const frameIndex = clamp(
-            Math.round(fp * (TOTAL_FRAMES - 1)),
-            0,
-            TOTAL_FRAMES - 1
-          )
-
-          if (frameIndex !== currentFrameRef.current) {
-            currentFrameRef.current = frameIndex
-            drawFrame(frameIndex)
-            prefetchWindow(frameIndex, frameCacheRef.current, isMobile)
+          // --- Lock logic ---
+          if (isLockedRef.current && pendingScrollRef.current === null) {
+            // User is trying to scroll while locked — store intent and clamp
+            pendingScrollRef.current = sp
+            // Clamp back to the locked pause frame
+            if (lastPauseFrame !== null) {
+              const clampedProgress = lastPauseFrame / (TOTAL_FRAMES - 1)
+              // Force back by setting progress on the trigger
+              st.scroll(
+                st.start +
+                  clampedProgress * (st.end - st.start)
+              )
+            }
+            return
           }
 
-          const chapter = getActiveChapter(sp)
-          setActiveChapter(chapter)
+          const rawFrame = scrollToFrameIndex(sp)
+          const pause = getActivePause(rawFrame)
 
-          // Engage lock when first entering a dwell zone
-          if (chapter && !isScrollLockedRef.current) {
-            isScrollLockedRef.current = true
-            // Auto-release after 800ms so user doesn't get stuck
-            if (lockTimeoutRef.current) clearTimeout(lockTimeoutRef.current)
-            lockTimeoutRef.current = setTimeout(releaseLock, 800)
+          if (pause) {
+            // Enforce the exact pause frame
+            const pauseProgress = pause.frame / (TOTAL_FRAMES - 1)
+            if (lastPauseFrame !== pause.frame) {
+              // Just entered this pause
+              lastPauseFrame = pause.frame
+              isLockedRef.current = true
+              setActivePause(pause)
+              setScrollP(sp)
+
+              // Snap to pause frame
+              st.scroll(
+                st.start + pauseProgress * (st.end - st.start)
+              )
+
+              // Draw the locked frame
+              currentFrameRef.current = pause.frame
+              drawFrame(pause.frame)
+              prefetchWindow(pause.frame, frameCacheRef.current, isMobile)
+
+              // Start unlock timer
+              if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+              lockTimerRef.current = setTimeout(releaseLock, PAUSE_LOCK_MS)
+            }
+            pendingScrollRef.current = null
+          } else {
+            lastPauseFrame = null
+            pendingScrollRef.current = null
+            if (!isLockedRef.current) {
+              setActivePause(null)
+              setScrollP(sp)
+
+              if (rawFrame !== currentFrameRef.current) {
+                currentFrameRef.current = rawFrame
+                drawFrame(rawFrame)
+                prefetchWindow(rawFrame, frameCacheRef.current, isMobile)
+              }
+            }
           }
         },
       })
@@ -311,6 +305,19 @@ export default function ScrollScrubber() {
     { scope: sectionRef, dependencies: [isMobile, drawFrame, releaseLock] }
   )
 
+  // ---------------------------------------------------------------------------
+  // Wheel handler: absorb wheel events during lock
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (isLockedRef.current) {
+        e.preventDefault()
+      }
+    }
+    window.addEventListener("wheel", onWheel, { passive: false })
+    return () => window.removeEventListener("wheel", onWheel)
+  }, [releaseLock])
+
   const sectionHeight = `${(SCROLL_MULTIPLIER + 1) * 100}vh`
 
   return (
@@ -319,36 +326,27 @@ export default function ScrollScrubber() {
       style={{ height: sectionHeight }}
       className="relative bg-black"
     >
-      {/* Sticky viewport-height stage */}
+      {/* Sticky canvas stage */}
       <div
-        ref={stickyRef}
         className="sticky top-0 w-full overflow-hidden"
         style={{ height: "100vh" }}
       >
-        {/* Canvas: renders current PNG frame */}
         <canvas
           ref={canvasRef}
           className="absolute inset-0 w-full h-full"
           style={{ display: "block" }}
         />
 
-        {/* Dark gradient to improve text legibility */}
-        <div
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            background:
-              "linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 50%)",
-          }}
+        {/* Chapter text overlay */}
+        <ChapterOverlay pause={activePause} />
+
+        {/* Progress dots */}
+        <ProgressDots
+          activeIndex={activePause ? activePause.frame : -1}
         />
 
-        {/* Chapter text overlay */}
-        <ChapterOverlay chapter={activeChapter} dwellProgress={0} />
-
-        {/* Navigation dots */}
-        <ProgressDots scrollP={scrollP} />
-
-        {/* Scroll hint (only before first chapter) */}
-        {scrollP < CHAPTERS[0].dwellStart && (
+        {/* Scroll hint (only before first pause) */}
+        {scrollP < 0.02 && (
           <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none">
             <span className="text-white/40 text-xs uppercase tracking-widest">
               Scroll
