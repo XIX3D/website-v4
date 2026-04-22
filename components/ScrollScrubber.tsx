@@ -207,7 +207,7 @@ export default function ScrollScrubber() {
 
     lockTimerRef.current = setTimeout(() => {
       playbackStateRef.current = 'idle'
-    }, PAUSE_LOCK_MS)
+    }, 0)
   }, [])
 
   // ---------------------------------------------------------------------------
