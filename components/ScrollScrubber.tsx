@@ -112,6 +112,9 @@ export default function ScrollScrubber() {
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartYRef = useRef<number | null>(null)
 
+  // enterLocked as ref so RAF loop never restarts when it changes
+  const enterLockedRef = useRef<((target: number) => void) | null>(null)
+
   // RAF timing refs
   const rafLastRef = useRef<number>(0) // ms, 0 = bootstrap next tick
   const rafAccumRef = useRef<number>(0) // accumulated time in seconds
@@ -210,8 +213,31 @@ export default function ScrollScrubber() {
     }, PAUSE_LOCK_MS)
   }, [])
 
+  // Keep enterLockedRef in sync — runs after every render
+  useEffect(() => {
+    enterLockedRef.current = (target: number) => {
+      if (lockTimerRef.current) {
+        clearTimeout(lockTimerRef.current)
+        lockTimerRef.current = null
+      }
+
+      playbackStateRef.current = 'locked'
+      targetFrameRef.current = null
+      currentFrameRef.current = target
+      drawFrameRef.current(target)
+      prefetchWindow(target, frameCacheRef.current, isMobileRef.current)
+
+      const pp = PAUSE_POINTS.find((p) => p.frame === target) ?? null
+      setActivePause(pp)
+
+      lockTimerRef.current = setTimeout(() => {
+        playbackStateRef.current = 'idle'
+      }, PAUSE_LOCK_MS)
+    }
+  })
+
   // ---------------------------------------------------------------------------
-  // RAF playback loop
+  // RAF playback loop — zero deps, never restarts
   // Target: 30 unique frames shown per second (30fps playback)
   // RAF runs at monitor rate (60–144fps), we time-correct to exactly 30fps
   // ---------------------------------------------------------------------------
@@ -255,7 +281,7 @@ export default function ScrollScrubber() {
           rafAccumRef.current = 0
           break
         } else if (Math.abs(remaining) === 1) {
-          enterLocked(target)
+          enterLockedRef.current?.(target)
           break
         } else {
           const step = Math.sign(remaining)
@@ -269,7 +295,7 @@ export default function ScrollScrubber() {
     }
 
     requestAnimationFrame(loop)
-  }, [enterLocked])
+  }, [])
 
   // ---------------------------------------------------------------------------
   // Wheel
