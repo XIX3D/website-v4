@@ -19,7 +19,10 @@ body {
   font-family: Arial, Helvetica, sans-serif;
   /* Prevent white flash and horizontal overflow */
   overflow-x: hidden;
+  /* Disable native overscroll to let canvas handler own all scroll/touch */
   overscroll-behavior: none;
+  touch-action: none;
+  -webkit-overflow-scrolling: auto;
 }
 
 /* Prevent layout shift from scrollbar */
