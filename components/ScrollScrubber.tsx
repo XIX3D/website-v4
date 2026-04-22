@@ -14,10 +14,6 @@ function pad(index: number): string {
   return String(index).padStart(3, "0")
 }
 
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v))
-}
-
 // ---------------------------------------------------------------------------
 // Frame cache
 // ---------------------------------------------------------------------------
@@ -110,16 +106,20 @@ export default function ScrollScrubber() {
   const frameCacheRef = useRef<FrameCache>(buildFrameCache())
   const currentFrameRef = useRef(0)
 
-  // Playback state — all driven by scroll accumulation
-  const scrollAccumRef = useRef(0)     // accumulated wheel delta (positive = forward)
-  const isLockedRef = useRef(false)    // pause lock — wheel is blocked
+  // 'idle' = waiting for user to scroll
+  // 'playing' = auto-playing frames toward next pause point
+  // 'locked' = paused at a frame, lock timer running
+  const playbackStateRef = useRef<'idle' | 'playing' | 'locked'>('idle')
+  const targetFrameRef = useRef<number | null>(null)
+  const lastFrameTimeRef = useRef<number>(0)
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const rafRef = useRef<number | null>(null)
   const touchStartYRef = useRef<number | null>(null)
 
   const [activePause, setActivePause] = useState<PausePoint | null>(null)
   const [scrollStarted, setScrollStarted] = useState(false)
 
-  // Hide scrollbars globally
+  // Hide scrollbars
   useEffect(() => {
     document.documentElement.style.overflow = "hidden"
     document.body.style.overflow = "hidden"
@@ -178,77 +178,175 @@ export default function ScrollScrubber() {
   }, [isMobile])
 
   // ---------------------------------------------------------------------------
-  // Advance one frame (called by RAF during playback)
+  // Advance to next frame toward target
   // ---------------------------------------------------------------------------
-  const advanceFrame = useCallback(
+  const stepFrame = useCallback(
     (direction: 1 | -1) => {
-      if (isLockedRef.current) return
+      const next = currentFrameRef.current + direction
+      if (next < 0 || next >= TOTAL_FRAMES) return
 
-      const next = clamp(currentFrameRef.current + direction, 0, TOTAL_FRAMES - 1)
       currentFrameRef.current = next
       drawFrame(next)
       prefetchWindow(next, frameCacheRef.current, isMobile)
 
-      // Check if we've landed on a pause frame
-      const isPause = PAUSE_POINTS.some((pp) => pp.frame === next)
-      if (isPause) {
-        isLockedRef.current = true
+      // Check if we reached the target
+      if (targetFrameRef.current !== null && next === targetFrameRef.current) {
+        // Arrived — lock
+        playbackStateRef.current = 'locked'
         const pp = PAUSE_POINTS.find((p) => p.frame === next)!
         setActivePause(pp)
-        scrollAccumRef.current = 0
 
         if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
         lockTimerRef.current = setTimeout(() => {
-          isLockedRef.current = false
+          playbackStateRef.current = 'idle'
+          targetFrameRef.current = null
+          setActivePause(null)
         }, PAUSE_LOCK_MS)
-      } else {
-        setActivePause(null)
       }
     },
     [drawFrame, isMobile]
   )
 
   // ---------------------------------------------------------------------------
-  // RAF playback loop — smooth, continuous frame stepping driven by accumulator
+  // Playback RAF loop
   // ---------------------------------------------------------------------------
   useEffect(() => {
+    // Target: traverse the full scroll range in ~6 seconds
+    // Each frame of scroll covers TOTAL_FRAMES / SCROLL_MULTIPLIER frames of video
+    // We want to traverse the ENTIRE scroll range in ~6 seconds
+    // That's SCROLL_MULTIPLIER * 100vh of scroll space
+    // 6 seconds → SCROLL_MULTIPLIER * 100vh / 6 vh per second
+    // But we only play between pause points, so compute based on segment length
+
+    // Playback speed: pixels of scroll "travel" per second
+    // We simulate scrolling at ~300vh/s (feels snappy but watchable)
+    const SCROLL_VH_PER_SEC = 300
+    const PX_PER_VH = typeof window !== 'undefined' ? window.innerHeight : 800
+    const PX_PER_SEC = SCROLL_VH_PER_SEC * PX_PER_VH
+
     let lastTime = 0
-    const FRAME_STEP_PX = 80 // pixels of wheel delta per frame step
 
     const loop = (time: number) => {
-      if (!isLockedRef.current && scrollAccumRef.current !== 0) {
-        // Determine how many frames to advance this tick
-        const framesToStep = Math.floor(Math.abs(scrollAccumRef.current) / FRAME_STEP_PX)
+      if (playbackStateRef.current === 'playing') {
+        if (lastTime === 0) lastTime = time
+        const elapsed = (time - lastTime) / 1000 // seconds
+        const pxTraveled = elapsed * PX_PER_SEC
+
+        // How many frames of our sequence does this scroll distance cover?
+        const pxPerFrame = (SCROLL_MULTIPLIER * PX_PER_VH) / TOTAL_FRAMES
+        const framesToStep = Math.floor(pxTraveled / pxPerFrame)
+
 
         if (framesToStep > 0) {
-          const dir: 1 | -1 = scrollAccumRef.current > 0 ? 1 : -1
-          // Cap at 3 frames per RAF tick for smooth fast scrolling
-          for (let i = 0; i < Math.min(framesToStep, 3); i++) {
-            advanceFrame(dir)
+          const target = targetFrameRef.current!
+          const current = currentFrameRef.current
+          const remaining = target - current
+
+          if (Math.abs(remaining) <= framesToStep) {
+            // Land exactly on target
+            currentFrameRef.current = target
+            drawFrame(target)
+            prefetchWindow(target, frameCacheRef.current, isMobile)
+            playbackStateRef.current = 'locked'
+            lastTime = 0
+            const pp = PAUSE_POINTS.find((p) => p.frame === target)
+            setActivePause(pp ?? null)
+
+            if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+            lockTimerRef.current = setTimeout(() => {
+              playbackStateRef.current = 'idle'
+              targetFrameRef.current = null
+              setActivePause(null)
+            }, PAUSE_LOCK_MS)
+          } else {
+            // Step toward target
+            const dir = remaining > 0 ? 1 : -1
+            const step = dir * framesToStep
+            currentFrameRef.current += step
+            drawFrame(currentFrameRef.current)
+            prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobile)
+            lastTime = time
           }
-          // Decay the accumulator
-          scrollAccumRef.current -= dir * framesToStep * FRAME_STEP_PX
+        } else {
+          lastTime = time
         }
+      } else {
+        lastTime = 0
       }
-      lastTime = time
-      requestAnimationFrame(loop)
+
+      rafRef.current = requestAnimationFrame(loop)
     }
 
-    requestAnimationFrame(loop)
-  }, [advanceFrame])
+    rafRef.current = requestAnimationFrame(loop)
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [drawFrame, isMobile])
 
   // ---------------------------------------------------------------------------
-  // Wheel → accumulate scroll distance (no direct frame jumping)
+  // Wheel: scroll forward → start auto-play to next pause frame
+  //        scroll backward (when locked) → go to previous pause frame
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
+
+      const state = playbackStateRef.current
+
+      if (state === 'playing') {
+        // Block all wheel input during auto-play
+        return
+      }
+
+      if (state === 'locked') {
+        // Only allow backward scroll to exit to previous pause
+        if (e.deltaY < 0) {
+          // Go back to previous pause point
+          const current = currentFrameRef.current
+          const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).pop()
+          if (prevPause) {
+            playbackStateRef.current = 'playing'
+            targetFrameRef.current = prevPause.frame
+            setActivePause(null)
+          }
+        }
+        return
+      }
+
+      // state === 'idle'
       setScrollStarted(true)
 
-      if (isLockedRef.current) return
+      if (e.deltaY > 0) {
+        // Scrolling forward — find next pause frame and auto-play to it
+        const current = currentFrameRef.current
+        const nextPause = PAUSE_POINTS.find((pp) => pp.frame > current)
 
-      // Accumulate — no clamping so fast scrolls carry momentum
-      scrollAccumRef.current += e.deltaY
+        if (nextPause) {
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = nextPause.frame
+          // Don't show overlay mid-playback
+          setActivePause(null)
+        } else {
+          // No more pause frames — play to end
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = TOTAL_FRAMES - 1
+          setActivePause(null)
+        }
+      } else if (e.deltaY < 0) {
+        // Scrolling backward — go back to previous pause point
+        const current = currentFrameRef.current
+        const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).pop()
+        if (prevPause) {
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = prevPause.frame
+          setActivePause(null)
+        } else {
+          // Go back to start
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = 0
+          setActivePause(null)
+        }
+      }
     }
 
     window.addEventListener("wheel", onWheel, { passive: false })
@@ -256,7 +354,7 @@ export default function ScrollScrubber() {
   }, [])
 
   // ---------------------------------------------------------------------------
-  // Touch → same accumulation pattern
+  // Touch: same logic
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const onTouchStart = (e: TouchEvent) => {
@@ -264,12 +362,54 @@ export default function ScrollScrubber() {
     }
     const onTouchMove = (e: TouchEvent) => {
       e.preventDefault()
-      if (isLockedRef.current) return
       if (touchStartYRef.current === null) return
       const delta = touchStartYRef.current - e.touches[0].clientY
       touchStartYRef.current = e.touches[0].clientY
       setScrollStarted(true)
-      scrollAccumRef.current += delta
+
+      const state = playbackStateRef.current
+
+      if (state === 'playing') return
+
+      if (state === 'locked') {
+        if (delta > 0) {
+          const current = currentFrameRef.current
+          const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).pop()
+          if (prevPause) {
+            playbackStateRef.current = 'playing'
+            targetFrameRef.current = prevPause.frame
+            setActivePause(null)
+          }
+        }
+        return
+      }
+
+      // idle
+      if (delta > 0) {
+        const current = currentFrameRef.current
+        const nextPause = PAUSE_POINTS.find((pp) => pp.frame > current)
+        if (nextPause) {
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = nextPause.frame
+          setActivePause(null)
+        } else {
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = TOTAL_FRAMES - 1
+          setActivePause(null)
+        }
+      } else if (delta < 0) {
+        const current = currentFrameRef.current
+        const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).pop()
+        if (prevPause) {
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = prevPause.frame
+          setActivePause(null)
+        } else {
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = 0
+          setActivePause(null)
+        }
+      }
     }
 
     window.addEventListener("touchstart", onTouchStart, { passive: true })
