@@ -116,7 +116,7 @@ export default function ScrollScrubber() {
   const rafLastRef = useRef<number>(0)
   const rafIdRef = useRef<number | null>(null)
 
-  const [activePause, setActivePause] = useState<PausePoint | null>(null)
+  const [activePause, setActivePause] = useState<PausePoint | null>(PAUSE_POINTS[0] ?? null)
   const [scrollStarted, setScrollStarted] = useState(false)
 
   // Hide scrollbars
