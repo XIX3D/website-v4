@@ -93,9 +93,9 @@ const CDN_BASE = "https://floeztbeqtdehjvurcwg.supabase.co/storage/v1/object/pub
 function framePath(index: number, isMobile: boolean): string {
   const padded = String(index).padStart(3, "0")
   if (isMobile) {
-    return `${CDN_BASE}/mobile/Zeno Home Page Mobile SLOWED${padded}.png`
+    return `${CDN_BASE}/mobile/Zeno Home Page Mobile SLOWED${padded}.webp`
   }
-  return `${CDN_BASE}/horizontal/Zeno Home Page Desktop SLOWER${padded}.png`
+  return `${CDN_BASE}/horizontal/Zeno Home Page Desktop SLOWER${padded}.webp`
 }
 
 function loadFrame(
