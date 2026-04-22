@@ -1,1 +1,2 @@
-!public/media/*
+# Ignore large media — frames are served from CDN
+public/media/
