@@ -220,7 +220,7 @@ export default function ScrollScrubber() {
 
     // Playback speed: pixels of scroll "travel" per second
     // We simulate scrolling at ~300vh/s (feels snappy but watchable)
-    const SCROLL_VH_PER_SEC = 300
+    const SCROLL_VH_PER_SEC = 50
     const PX_PER_VH = typeof window !== 'undefined' ? window.innerHeight : 800
     const PX_PER_SEC = SCROLL_VH_PER_SEC * PX_PER_VH
 
@@ -249,10 +249,15 @@ export default function ScrollScrubber() {
             prefetchWindow(target, frameCacheRef.current, isMobile)
             playbackStateRef.current = 'locked'
             lastTime = 0
+
+            // Clear any existing lock timer
+            if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+            lockTimerRef.current = null
+
             const pp = PAUSE_POINTS.find((p) => p.frame === target)
             setActivePause(pp ?? null)
 
-            if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+            // Lock timer: after PAUSE_LOCK_MS, unlock
             lockTimerRef.current = setTimeout(() => {
               playbackStateRef.current = 'idle'
               targetFrameRef.current = null
