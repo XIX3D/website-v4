@@ -6,7 +6,6 @@ import {
   PAUSE_POINTS,
   TOTAL_FRAMES,
   SCROLL_MULTIPLIER,
-  PAUSE_LOCK_MS,
   type PausePoint,
 } from "@/data/pausePoints"
 
@@ -112,9 +111,13 @@ export default function ScrollScrubber() {
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartYRef = useRef<number | null>(null)
 
-  // RAF timing refs
-  const rafLastRef = useRef<number>(0) // ms, 0 = bootstrap next tick
-  const rafAccumRef = useRef<number>(0) // accumulated time in seconds
+  // RAF timing state — local to RAF effect but reset by wheel/touch via this ref
+  const rafResetRef = useRef(false)
+
+  // Live refs updated every render — RAF loop reads via .current
+  const drawFrameRef = useRef<((index: number) => void) | null>(null)
+  const isMobileRef = useRef(isMobile)
+  const enterLockedRef = useRef<((target: number) => void) | null>(null)
 
   const [activePause, setActivePause] = useState<PausePoint | null>(PAUSE_POINTS[0] ?? null)
   const [scrollStarted, setScrollStarted] = useState(false)
@@ -178,10 +181,8 @@ export default function ScrollScrubber() {
   }, [isMobile])
 
   // ---------------------------------------------------------------------------
-  // Refs so RAF loop always has fresh callbacks
+  // Sync live refs — RAF loop reads these without being a reactive dependency
   // ---------------------------------------------------------------------------
-  const drawFrameRef = useRef(drawFrame)
-  const isMobileRef = useRef(isMobile)
   useEffect(() => {
     drawFrameRef.current = drawFrame
     isMobileRef.current = isMobile
@@ -199,7 +200,7 @@ export default function ScrollScrubber() {
     playbackStateRef.current = 'locked'
     targetFrameRef.current = null
     currentFrameRef.current = target
-    drawFrameRef.current(target)
+    drawFrameRef.current?.(target)
     prefetchWindow(target, frameCacheRef.current, isMobileRef.current)
 
     const pp = PAUSE_POINTS.find((p) => p.frame === target) ?? null
@@ -207,69 +208,101 @@ export default function ScrollScrubber() {
 
     lockTimerRef.current = setTimeout(() => {
       playbackStateRef.current = 'idle'
+      setActivePause(null)
     }, 0)
   }, [])
 
+  // Sync enterLocked ref
+  useEffect(() => {
+    enterLockedRef.current = enterLocked
+  })
+
   // ---------------------------------------------------------------------------
-  // RAF playback loop
-  // Target: 30 unique frames shown per second (30fps playback)
-  // RAF runs at monitor rate (60–144fps), we time-correct to exactly 30fps
+  // RAF playback loop — zero-reactive-dependency design
+  // Runs at monitor rate, steps frames at exactly 30fps with time-corrected dt
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const TARGET_FPS = 30
-    const FRAME_INTERVAL_S = 1 / TARGET_FPS // ~0.03333s per frame
+    const FRAME_INTERVAL_S = 1 / TARGET_FPS
+
+    let lastTime = 0
+    let accum = 0
+    let rafId = 0
 
     const loop = (time: number) => {
-      if (playbackStateRef.current !== 'playing') {
-        // Don't reset rafLastRef here — we want to resume timing seamlessly
-        return requestAnimationFrame(loop)
-      }
-
-      if (rafLastRef.current === 0) {
-        rafLastRef.current = time
-        rafAccumRef.current = 0
-      }
-
-      const elapsed = (time - rafLastRef.current) / 1000
-      rafLastRef.current = time
-      rafAccumRef.current += elapsed
-
-      // Step one frame whenever we've accumulated 1/30th of a second
-      while (rafAccumRef.current >= FRAME_INTERVAL_S) {
-        rafAccumRef.current -= FRAME_INTERVAL_S
-
-        const target = targetFrameRef.current
-        if (target === null) {
-          playbackStateRef.current = 'locked'
-          rafLastRef.current = 0
-          rafAccumRef.current = 0
-          break
+      if (playbackStateRef.current === 'playing') {
+        // Bootstrap on first playing tick
+        if (lastTime === 0) {
+          lastTime = time
+          accum = 0
         }
 
-        const current = currentFrameRef.current
-        const remaining = target - current
+        const dt = (time - lastTime) / 1000
+        lastTime = time
+        accum += dt
 
-        if (remaining === 0) {
-          playbackStateRef.current = 'locked'
-          rafLastRef.current = 0
-          rafAccumRef.current = 0
-          break
-        } else if (Math.abs(remaining) === 1) {
-          enterLocked(target)
-          break
-        } else {
-          const step = Math.sign(remaining)
-          currentFrameRef.current += step
-          drawFrameRef.current(currentFrameRef.current)
+        // Check for timing reset request from wheel/touch handler
+        if (rafResetRef.current) {
+          rafResetRef.current = false
+          lastTime = 0
+          accum = 0
+        }
+
+        // Step one frame per 1/30th second
+        while (accum >= FRAME_INTERVAL_S) {
+          accum -= FRAME_INTERVAL_S
+
+          const target = targetFrameRef.current
+
+          // Target cleared — enter locked
+          if (target === null) {
+            playbackStateRef.current = 'locked'
+            lastTime = 0
+            accum = 0
+            enterLockedRef.current?.(currentFrameRef.current)
+            break
+          }
+
+          const current = currentFrameRef.current
+          const remaining = target - current
+
+          // Arrived at target
+          if (remaining === 0) {
+            playbackStateRef.current = 'locked'
+            lastTime = 0
+            accum = 0
+            enterLockedRef.current?.(current)
+            break
+          }
+
+          // One frame away — step onto target and lock
+          if (Math.abs(remaining) === 1) {
+            currentFrameRef.current += Math.sign(remaining)
+            drawFrameRef.current?.(currentFrameRef.current)
+            prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobileRef.current)
+            playbackStateRef.current = 'locked'
+            lastTime = 0
+            accum = 0
+            enterLockedRef.current?.(currentFrameRef.current)
+            break
+          }
+
+          // Normal step
+          currentFrameRef.current += Math.sign(remaining)
+          drawFrameRef.current?.(currentFrameRef.current)
           prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobileRef.current)
         }
+      } else {
+        lastTime = 0
+        accum = 0
       }
 
-      requestAnimationFrame(loop)
+      rafId = requestAnimationFrame(loop)
     }
 
-    requestAnimationFrame(loop)
-  }, [enterLocked])
+    rafId = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(rafId)
+  }, [])
 
   // ---------------------------------------------------------------------------
   // Wheel
@@ -287,8 +320,7 @@ export default function ScrollScrubber() {
           const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).at(-1)
           if (prevPause) {
             targetFrameRef.current = prevPause.frame
-            rafLastRef.current = 0
-            rafAccumRef.current = 0
+            rafResetRef.current = true
           }
         }
         return
@@ -304,8 +336,6 @@ export default function ScrollScrubber() {
             playbackStateRef.current = 'playing'
             targetFrameRef.current = prevPause.frame
             setActivePause(null)
-            rafLastRef.current = 0
-            rafAccumRef.current = 0
           }
         }
         return
@@ -365,8 +395,7 @@ export default function ScrollScrubber() {
           const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).at(-1)
           if (prevPause) {
             targetFrameRef.current = prevPause.frame
-            rafLastRef.current = 0
-            rafAccumRef.current = 0
+            rafResetRef.current = true
           }
         }
         return
@@ -382,14 +411,13 @@ export default function ScrollScrubber() {
             playbackStateRef.current = 'playing'
             targetFrameRef.current = prevPause.frame
             setActivePause(null)
-            rafLastRef.current = 0
-            rafAccumRef.current = 0
           }
         }
         return
       }
 
       const current = currentFrameRef.current
+
       if (delta > 0) {
         const nextPause = PAUSE_POINTS.find((pp) => pp.frame > current)
         if (nextPause) {
