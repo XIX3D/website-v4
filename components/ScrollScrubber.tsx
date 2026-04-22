@@ -112,29 +112,16 @@ export default function ScrollScrubber() {
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartYRef = useRef<number | null>(null)
 
-  // enterLocked as ref so RAF loop never restarts when it changes
-  const enterLockedRef = useRef<((target: number) => void) | null>(null)
+  // RAF refs — local to the effect, kept alive by the closure
+  const rafIdRef = useRef<number | null>(null)
+  const rafLastRef = useRef<number>(0)
 
-  // RAF timing refs
-  const rafLastRef = useRef<number>(0) // ms, 0 = bootstrap next tick
-  const rafAccumRef = useRef<number>(0) // accumulated time in seconds
+  // Live refs — always point to current callbacks, no stale closures
+  const drawFrameRef = useRef<((index: number) => void) | null>(null)
+  const isMobileRef = useRef(isMobile)
 
   const [activePause, setActivePause] = useState<PausePoint | null>(PAUSE_POINTS[0] ?? null)
   const [scrollStarted, setScrollStarted] = useState(false)
-
-  // Hide scrollbars
-  useEffect(() => {
-    document.documentElement.style.overflow = "hidden"
-    document.body.style.overflow = "hidden"
-    return () => {
-      document.documentElement.style.overflow = ""
-      document.body.style.overflow = ""
-    }
-  }, [])
-
-  useEffect(() => {
-    frameCacheRef.current = buildFrameCache()
-  }, [isMobile])
 
   // ---------------------------------------------------------------------------
   // Draw a frame
@@ -170,6 +157,31 @@ export default function ScrollScrubber() {
     drawFrame(currentFrameRef.current)
   }, [drawFrame])
 
+  // ---------------------------------------------------------------------------
+  // Keep live refs in sync (no deps — runs after every render)
+  // ---------------------------------------------------------------------------
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    drawFrameRef.current = drawFrame
+    isMobileRef.current = isMobile
+  })
+
+  // ---------------------------------------------------------------------------
+  // Hide scrollbars
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    document.documentElement.style.overflow = "hidden"
+    document.body.style.overflow = "hidden"
+    return () => {
+      document.documentElement.style.overflow = ""
+      document.body.style.overflow = ""
+    }
+  }, [])
+
+  useEffect(() => {
+    frameCacheRef.current = buildFrameCache()
+  }, [isMobile])
+
   useEffect(() => {
     resizeCanvas()
     window.addEventListener("resize", resizeCanvas)
@@ -181,17 +193,7 @@ export default function ScrollScrubber() {
   }, [isMobile])
 
   // ---------------------------------------------------------------------------
-  // Refs so RAF loop always has fresh callbacks
-  // ---------------------------------------------------------------------------
-  const drawFrameRef = useRef(drawFrame)
-  const isMobileRef = useRef(isMobile)
-  useEffect(() => {
-    drawFrameRef.current = drawFrame
-    isMobileRef.current = isMobile
-  })
-
-  // ---------------------------------------------------------------------------
-  // Enter locked state at a target frame
+  // Enter locked state — pure function, no hooks, called from RAF or handlers
   // ---------------------------------------------------------------------------
   const enterLocked = useCallback((target: number) => {
     if (lockTimerRef.current) {
@@ -202,7 +204,7 @@ export default function ScrollScrubber() {
     playbackStateRef.current = 'locked'
     targetFrameRef.current = null
     currentFrameRef.current = target
-    drawFrameRef.current(target)
+    drawFrameRef.current?.(target)
     prefetchWindow(target, frameCacheRef.current, isMobileRef.current)
 
     const pp = PAUSE_POINTS.find((p) => p.frame === target) ?? null
@@ -213,89 +215,74 @@ export default function ScrollScrubber() {
     }, PAUSE_LOCK_MS)
   }, [])
 
-  // Keep enterLockedRef in sync — runs after every render
-  useEffect(() => {
-    enterLockedRef.current = (target: number) => {
-      if (lockTimerRef.current) {
-        clearTimeout(lockTimerRef.current)
-        lockTimerRef.current = null
-      }
-
-      playbackStateRef.current = 'locked'
-      targetFrameRef.current = null
-      currentFrameRef.current = target
-      drawFrameRef.current(target)
-      prefetchWindow(target, frameCacheRef.current, isMobileRef.current)
-
-      const pp = PAUSE_POINTS.find((p) => p.frame === target) ?? null
-      setActivePause(pp)
-
-      lockTimerRef.current = setTimeout(() => {
-        playbackStateRef.current = 'idle'
-      }, PAUSE_LOCK_MS)
-    }
-  })
-
   // ---------------------------------------------------------------------------
-  // RAF playback loop — zero deps, never restarts
-  // Target: 30 unique frames shown per second (30fps playback)
-  // RAF runs at monitor rate (60–144fps), we time-correct to exactly 30fps
+  // RAF playback loop
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const TARGET_FPS = 30
-    const FRAME_INTERVAL_S = 1 / TARGET_FPS // ~0.03333s per frame
+    const FRAME_INTERVAL_S = 1 / TARGET_FPS
 
     const loop = (time: number) => {
+      rafIdRef.current = requestAnimationFrame(loop)
+
+      // Only advance when playing
       if (playbackStateRef.current !== 'playing') {
-        // Don't reset rafLastRef here — we want to resume timing seamlessly
-        return requestAnimationFrame(loop)
+        rafLastRef.current = 0 // reset so next play starts clean
+        return
       }
 
+      // Bootstrap on first tick
       if (rafLastRef.current === 0) {
         rafLastRef.current = time
-        rafAccumRef.current = 0
+        return
       }
 
-      const elapsed = (time - rafLastRef.current) / 1000
+      const dt = (time - rafLastRef.current) / 1000
       rafLastRef.current = time
-      rafAccumRef.current += elapsed
 
-      // Step one frame whenever we've accumulated 1/30th of a second
-      while (rafAccumRef.current >= FRAME_INTERVAL_S) {
-        rafAccumRef.current -= FRAME_INTERVAL_S
+      if (dt > 0.1) return // reject huge time steps (tab switch, etc.)
 
-        const target = targetFrameRef.current
-        if (target === null) {
-          playbackStateRef.current = 'locked'
-          rafLastRef.current = 0
-          rafAccumRef.current = 0
-          break
-        }
+      const target = targetFrameRef.current
+      const current = currentFrameRef.current
 
-        const current = currentFrameRef.current
-        const remaining = target - current
-
-        if (remaining === 0) {
-          playbackStateRef.current = 'locked'
-          rafLastRef.current = 0
-          rafAccumRef.current = 0
-          break
-        } else if (Math.abs(remaining) === 1) {
-          enterLockedRef.current?.(target)
-          break
-        } else {
-          const step = Math.sign(remaining)
-          currentFrameRef.current += step
-          drawFrameRef.current(currentFrameRef.current)
-          prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobileRef.current)
-        }
+      if (target === null) {
+        playbackStateRef.current = 'locked'
+        return
       }
 
-      requestAnimationFrame(loop)
+      const remaining = target - current
+
+      if (remaining === 0) {
+        playbackStateRef.current = 'locked'
+        return
+      }
+
+      if (Math.abs(remaining) === 1) {
+        enterLocked(remaining > 0 ? current + 1 : current - 1)
+        return
+      }
+
+      // Clamp dt so we never step more than 3 frames per tick
+      const steps = Math.min(Math.round(dt / FRAME_INTERVAL_S), 3)
+      const step = Math.sign(remaining)
+      for (let i = 0; i < steps; i++) {
+        const next = currentFrameRef.current + step
+        if (next < 0 || next >= TOTAL_FRAMES) break
+        currentFrameRef.current = next
+        drawFrameRef.current?.(next)
+      }
+
+      prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobileRef.current)
     }
 
-    requestAnimationFrame(loop)
-  }, [])
+    rafIdRef.current = requestAnimationFrame(loop)
+    return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
+    }
+  }, [enterLocked])
 
   // ---------------------------------------------------------------------------
   // Wheel
@@ -307,6 +294,7 @@ export default function ScrollScrubber() {
 
       const state = playbackStateRef.current
 
+      // During playback: backward scroll reverses direction
       if (state === 'playing') {
         if (e.deltaY < 0) {
           const current = currentFrameRef.current
@@ -314,12 +302,12 @@ export default function ScrollScrubber() {
           if (prevPause) {
             targetFrameRef.current = prevPause.frame
             rafLastRef.current = 0
-            rafAccumRef.current = 0
           }
         }
         return
       }
 
+      // During locked: backward scroll reverses, forward is blocked
       if (state === 'locked') {
         if (e.deltaY < 0) {
           const current = currentFrameRef.current
@@ -331,12 +319,12 @@ export default function ScrollScrubber() {
             targetFrameRef.current = prevPause.frame
             setActivePause(null)
             rafLastRef.current = 0
-            rafAccumRef.current = 0
           }
         }
         return
       }
 
+      // Idle: start playback
       const current = currentFrameRef.current
 
       if (e.deltaY > 0) {
@@ -392,7 +380,6 @@ export default function ScrollScrubber() {
           if (prevPause) {
             targetFrameRef.current = prevPause.frame
             rafLastRef.current = 0
-            rafAccumRef.current = 0
           }
         }
         return
@@ -409,7 +396,6 @@ export default function ScrollScrubber() {
             targetFrameRef.current = prevPause.frame
             setActivePause(null)
             rafLastRef.current = 0
-            rafAccumRef.current = 0
           }
         }
         return
