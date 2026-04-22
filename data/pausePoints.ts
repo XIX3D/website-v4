@@ -12,6 +12,12 @@ export interface PausePoint {
 /** 4 pause points across the 505-frame animation */
 export const PAUSE_POINTS: PausePoint[] = [
   {
+    frame: 0,
+    eyebrow: "1400+",
+    title: "Vehicles",
+    body: "Browse thousands of vehicle configurations, packages and custom builds.",
+  },
+  {
     frame: 83,
     eyebrow: "1000+",
     title: "Vinyl & Films",

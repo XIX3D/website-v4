@@ -111,6 +111,10 @@ export default function ScrollScrubber() {
   const targetFrameRef = useRef<number | null>(null)
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartYRef = useRef<number | null>(null)
+  // Expose RAF state so we can reset it from enterLocked
+  const rafAccumRef = useRef<number>(0)
+  const rafLastRef = useRef<number>(0)
+  const rafIdRef = useRef<number | null>(null)
 
   const [activePause, setActivePause] = useState<PausePoint | null>(null)
   const [scrollStarted, setScrollStarted] = useState(false)
@@ -174,7 +178,7 @@ export default function ScrollScrubber() {
   }, [isMobile])
 
   // ---------------------------------------------------------------------------
-  // Refs so RAF loop always has fresh callbacks without restarts
+  // Refs so RAF loop always has fresh callbacks
   // ---------------------------------------------------------------------------
   const drawFrameRef = useRef(drawFrame)
   const isMobileRef = useRef(isMobile)
@@ -186,87 +190,90 @@ export default function ScrollScrubber() {
   // ---------------------------------------------------------------------------
   // Enter locked state at a target frame
   // ---------------------------------------------------------------------------
-  const enterLocked = useCallback(
-    (target: number) => {
-      if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+  const enterLocked = useCallback((target: number) => {
+    // Stop any pending timer
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current)
       lockTimerRef.current = null
+    }
 
-      playbackStateRef.current = 'locked'
-      targetFrameRef.current = null
-      currentFrameRef.current = target
-      drawFrameRef.current(target)
-      prefetchWindow(target, frameCacheRef.current, isMobileRef.current)
+    // Stop the RAF accumulation completely — prevents any frame stepping
+    rafAccumRef.current = 0
+    rafLastRef.current = 0
 
-      const pp = PAUSE_POINTS.find((p) => p.frame === target) ?? null
-      setActivePause(pp)
+    playbackStateRef.current = 'locked'
+    targetFrameRef.current = null
+    currentFrameRef.current = target
+    drawFrameRef.current(target)
+    prefetchWindow(target, frameCacheRef.current, isMobileRef.current)
 
-      lockTimerRef.current = setTimeout(() => {
-        // Transition to idle — overlay stays visible until user scrolls forward
-        // (forward scroll in wheel handler will hide overlay and start next playback)
-        playbackStateRef.current = 'idle'
-      }, PAUSE_LOCK_MS)
-    },
-    [] // no reactive deps — uses refs internally
-  )
+    const pp = PAUSE_POINTS.find((p) => p.frame === target) ?? null
+    setActivePause(pp)
+
+    // After dwell time, transition to idle (overlay stays, user must scroll to proceed)
+    lockTimerRef.current = setTimeout(() => {
+      playbackStateRef.current = 'idle'
+      // overlay stays visible — setActivePause NOT called
+    }, PAUSE_LOCK_MS)
+  }, [])
 
   // ---------------------------------------------------------------------------
-  // RAF playback loop — 15fps constant rate, no reactive deps
+  // RAF playback loop — 30fps constant rate
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const PLAYBACK_FPS = 30
-    let accumulator = 0
-    let lastTime = 0
-    let rafId: number
 
     const loop = (time: number) => {
+      // Only advance when in 'playing' state
       if (playbackStateRef.current === 'playing') {
-        if (lastTime === 0) {
-          lastTime = time
-          accumulator = 0
+        // Bootstrap on first tick
+        if (rafLastRef.current === 0) {
+          rafLastRef.current = time
+          rafAccumRef.current = 0
         }
 
-        const elapsed = (time - lastTime) / 1000
-        lastTime = time
-        accumulator += elapsed * PLAYBACK_FPS
+        const elapsed = (time - rafLastRef.current) / 1000
+        rafLastRef.current = time
+        rafAccumRef.current += elapsed * PLAYBACK_FPS
 
-        // Step one frame at a time
-        while (accumulator >= 1 && playbackStateRef.current === 'playing') {
-          accumulator -= 1
+        // Step exactly one frame per tick at 30fps
+        if (rafAccumRef.current >= 1) {
+          rafAccumRef.current -= 1
+
           const target = targetFrameRef.current
-          if (target === null) break
-
-          const current = currentFrameRef.current
-          const remaining = target - current
-          if (remaining === 0) {
-            // Already at target
+          if (target === null) {
             playbackStateRef.current = 'locked'
             break
           }
 
-          if (Math.abs(remaining) === 1) {
-            // Land exactly
-            enterLocked(target)
-            accumulator = 0
-            lastTime = 0
-            break
-          }
+          const current = currentFrameRef.current
+          const remaining = target - current
 
-          // Step one frame
-          const step = Math.sign(remaining) * 1
-          currentFrameRef.current += step
-          drawFrameRef.current(currentFrameRef.current)
-          prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobileRef.current)
+          if (remaining === 0) {
+            playbackStateRef.current = 'locked'
+          } else if (Math.abs(remaining) === 1) {
+            // Land exactly on target — enterLocked will stop the RAF accumulation
+            enterLocked(target)
+          } else {
+            const step = Math.sign(remaining) * 1
+            currentFrameRef.current += step
+            drawFrameRef.current(currentFrameRef.current)
+            prefetchWindow(currentFrameRef.current, frameCacheRef.current, isMobileRef.current)
+          }
         }
       } else {
-        lastTime = 0
-        accumulator = 0
+        // Reset timing so next play starts cleanly
+        rafLastRef.current = 0
+        rafAccumRef.current = 0
       }
 
-      rafId = requestAnimationFrame(loop)
+      rafIdRef.current = requestAnimationFrame(loop)
     }
 
-    rafId = requestAnimationFrame(loop)
-    return () => cancelAnimationFrame(rafId)
+    rafIdRef.current = requestAnimationFrame(loop)
+    return () => {
+      if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
+    }
   }, [enterLocked])
 
   // ---------------------------------------------------------------------------
@@ -279,21 +286,42 @@ export default function ScrollScrubber() {
 
       const state = playbackStateRef.current
 
-      if (state === 'playing') return
-
-      if (state === 'locked') {
+      // During playback: block forward scroll, allow backward
+      if (state === 'playing') {
         if (e.deltaY < 0) {
           const current = currentFrameRef.current
           const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).at(-1)
           if (prevPause) {
-            playbackStateRef.current = 'playing'
             targetFrameRef.current = prevPause.frame
-            setActivePause(null)
+            // Stay in 'playing', direction reversed by setting target
+            // Reset RAF timing for clean restart
+            rafLastRef.current = 0
+            rafAccumRef.current = 0
           }
         }
         return
       }
 
+      // During locked: only allow backward scroll
+      if (state === 'locked') {
+        if (e.deltaY < 0) {
+          const current = currentFrameRef.current
+          const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).at(-1)
+          if (prevPause) {
+            // Clear the lock timer so we don't return to idle
+            if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+            lockTimerRef.current = null
+            playbackStateRef.current = 'playing'
+            targetFrameRef.current = prevPause.frame
+            setActivePause(null)
+            rafLastRef.current = 0
+            rafAccumRef.current = 0
+          }
+        }
+        return
+      }
+
+      // Idle: start playback
       const current = currentFrameRef.current
 
       if (e.deltaY > 0) {
@@ -301,6 +329,11 @@ export default function ScrollScrubber() {
         if (nextPause) {
           playbackStateRef.current = 'playing'
           targetFrameRef.current = nextPause.frame
+          setActivePause(null)
+        } else {
+          // No more pauses — play to end
+          playbackStateRef.current = 'playing'
+          targetFrameRef.current = TOTAL_FRAMES - 1
           setActivePause(null)
         }
       } else if (e.deltaY < 0) {
@@ -337,16 +370,33 @@ export default function ScrollScrubber() {
       setScrollStarted(true)
 
       const state = playbackStateRef.current
-      if (state === 'playing') return
+
+      if (state === 'playing') {
+        if (delta > 0) {
+          // backward during playback
+          const current = currentFrameRef.current
+          const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).at(-1)
+          if (prevPause) {
+            targetFrameRef.current = prevPause.frame
+            rafLastRef.current = 0
+            rafAccumRef.current = 0
+          }
+        }
+        return
+      }
 
       if (state === 'locked') {
         if (delta > 0) {
           const current = currentFrameRef.current
           const prevPause = PAUSE_POINTS.filter((pp) => pp.frame < current).at(-1)
           if (prevPause) {
+            if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+            lockTimerRef.current = null
             playbackStateRef.current = 'playing'
             targetFrameRef.current = prevPause.frame
             setActivePause(null)
+            rafLastRef.current = 0
+            rafAccumRef.current = 0
           }
         }
         return
