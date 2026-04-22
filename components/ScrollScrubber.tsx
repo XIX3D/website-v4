@@ -243,7 +243,9 @@ export default function ScrollScrubber() {
           const target = targetFrameRef.current
           if (target === null) {
             playbackStateRef.current = 'locked'
-            break
+            rafAccumRef.current = 0
+            rafLastRef.current = 0
+            return
           }
 
           const current = currentFrameRef.current
