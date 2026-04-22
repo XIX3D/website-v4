@@ -201,8 +201,9 @@ export default function ScrollScrubber() {
       setActivePause(pp)
 
       lockTimerRef.current = setTimeout(() => {
+        // Transition to idle — overlay stays visible until user scrolls forward
+        // (forward scroll in wheel handler will hide overlay and start next playback)
         playbackStateRef.current = 'idle'
-        setActivePause(null)
       }, PAUSE_LOCK_MS)
     },
     [] // no reactive deps — uses refs internally
@@ -212,7 +213,7 @@ export default function ScrollScrubber() {
   // RAF playback loop — 15fps constant rate, no reactive deps
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    const PLAYBACK_FPS = 15
+    const PLAYBACK_FPS = 30
     let accumulator = 0
     let lastTime = 0
     let rafId: number
