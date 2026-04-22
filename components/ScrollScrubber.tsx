@@ -225,13 +225,13 @@ export default function ScrollScrubber() {
     const loop = (time: number) => {
       rafIdRef.current = requestAnimationFrame(loop)
 
-      // Only advance when playing
+      // Always reschedule — even when idle/locked we keep the RAF alive
       if (playbackStateRef.current !== 'playing') {
-        rafLastRef.current = 0 // reset so next play starts clean
+        rafLastRef.current = 0 // reset so next play starts fresh
         return
       }
 
-      // Bootstrap on first tick
+      // Bootstrap on first tick of a play session
       if (rafLastRef.current === 0) {
         rafLastRef.current = time
         return
@@ -240,7 +240,7 @@ export default function ScrollScrubber() {
       const dt = (time - rafLastRef.current) / 1000
       rafLastRef.current = time
 
-      if (dt > 0.1) return // reject huge time steps (tab switch, etc.)
+      if (dt > 0.1) return // reject huge time steps (tab switch, sleep, etc.)
 
       const target = targetFrameRef.current
       const current = currentFrameRef.current
