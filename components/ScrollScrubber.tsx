@@ -43,12 +43,13 @@ function loadFrame(
   if (cache[index]) return Promise.resolve(cache[index]!)
   return new Promise((resolve, reject) => {
     const img = new Image()
+    img.crossOrigin = "anonymous"
+    img.src = frameUrl(index, isMobile)
     img.onload = () => {
       cache[index] = img
       resolve(img)
     }
-    img.onerror = reject
-    img.src = frameUrl(index, isMobile)
+    img.onerror = () => reject(new Error(`Failed to load frame ${index}`))
   })
 }
 
