@@ -424,17 +424,18 @@ export default function ScrollScrubber() {
     }
 
     window.addEventListener("touchstart", onTouchStart, { passive: true })
-    window.addEventListener("touchmove", onTouchMove, { passive: false })
+    // capture:true so we intercept BEFORE Safari's native scroll gesture starts
+    window.addEventListener("touchmove", onTouchMove, { passive: false, capture: true })
     return () => {
       window.removeEventListener("touchstart", onTouchStart)
-      window.removeEventListener("touchmove", onTouchMove)
+      window.removeEventListener("touchmove", onTouchMove, { capture: true })
     }
   }, [])
 
   return (
     <div
       className="relative bg-black select-none"
-      style={{ height: `${SCROLL_MULTIPLIER * 100}vh`, touchAction: "none" }}
+      style={{ height: `${SCROLL_MULTIPLIER * 100}vh` }}
     >
       <div
         className="sticky top-0 w-full overflow-hidden"
