@@ -38,7 +38,9 @@ function frameUrl(index: number, isMobile: boolean): string {
 function loadFrame(
   index: number,
   cache: FrameCache,
-  isMobile: boolean
+  isMobile: boolean,
+  retries = 3,
+  delayMs = 300
 ): Promise<HTMLImageElement> {
   if (cache[index]) return Promise.resolve(cache[index]!)
   return new Promise((resolve, reject) => {
@@ -49,7 +51,44 @@ function loadFrame(
       cache[index] = img
       resolve(img)
     }
-    img.onerror = () => reject(new Error(`Failed to load frame ${index}`))
+    img.onerror = () => {
+      if (retries > 0) {
+        setTimeout(() => {
+          loadFrame(index, cache, isMobile, retries - 1, delayMs * 2)
+            .then(resolve)
+            .catch(reject)
+        }, delayMs)
+      } else {
+        reject(new Error(`Failed to load frame ${index} after retries`))
+      }
+    }
+  })
+}
+
+/**
+ * Load a frame, retry on failure, and return the best available frame.
+ * If the target frame can't load, try nearest neighbors.
+ */
+function loadFrameWithFallback(
+  index: number,
+  cache: FrameCache,
+  isMobile: boolean
+): Promise<HTMLImageElement> {
+  return loadFrame(index, cache, isMobile).catch(() => {
+    // Try nearest frames within a 10-frame radius
+    for (let delta = 1; delta <= 10; delta++) {
+      const lo = index - delta
+      const hi = index + delta
+      if (lo >= 0) {
+        const cached = cache[lo]
+        if (cached) return Promise.resolve(cached)
+      }
+      if (hi < TOTAL_FRAMES) {
+        const cached = cache[hi]
+        if (cached) return Promise.resolve(cached)
+      }
+    }
+    return Promise.reject(new Error(`No fallback frame available near ${index}`))
   })
 }
 
@@ -133,7 +172,7 @@ export default function ScrollScrubber() {
       if (!canvas) return
       const cache = frameCacheRef.current
       const doDraw = (img: HTMLImageElement) => {
-        const ctx = canvas.getContext("2d")
+        const ctx = canvas.getContext("2d", { willReadFrequently: true })
         if (!ctx) return
         ctx.clearRect(0, 0, canvas.width, canvas.height)
         const iw = img.naturalWidth
@@ -144,7 +183,9 @@ export default function ScrollScrubber() {
       if (cache[index]) {
         doDraw(cache[index]!)
       } else {
-        loadFrame(index, cache, isMobile).then(doDraw).catch(() => undefined)
+        loadFrameWithFallback(index, cache, isMobile)
+          .then(doDraw)
+          .catch(() => undefined)
       }
     },
     [isMobile]
